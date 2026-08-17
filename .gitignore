@@ -1,0 +1,12 @@
+node_modules
+dist
+.next
+.turbo
+cdk.out
+*.js.map
+.env
+.env.local
+.DS_Store
+*.log
+.cdk.staging
+coverage

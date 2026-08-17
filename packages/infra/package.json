@@ -1,0 +1,25 @@
+{
+  "name": "@ai-interviewer/infra",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy --all --require-approval never",
+    "diff": "cdk diff"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.201.0",
+    "constructs": "^10.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "aws-cdk": "^2.1018.1",
+    "esbuild": "^0.25.4",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "dotenv": "^16.4.7"
+  }
+}

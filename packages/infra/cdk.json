@@ -1,0 +1,9 @@
+{
+  "app": "npx tsx src/bin.ts",
+  "watch": {
+    "include": ["src/**", "../functions/src/**"]
+  },
+  "context": {
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true
+  }
+}
