@@ -76,6 +76,7 @@ export const transcriptTurnSchema = z.object({
   role: z.enum(["assistant", "user"]),
   text: z.string(),
   at: z.string(),
+  seq: z.number().int().nonnegative().optional(),
 });
 export type TranscriptTurn = z.infer<typeof transcriptTurnSchema>;
 

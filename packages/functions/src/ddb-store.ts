@@ -103,7 +103,7 @@ export class DynamoStore implements Store {
         TableName: this.tableName,
         Item: {
           pk: `INTERVIEW#${interviewId}`,
-        sk: `MSG#${turn.at}#${turn.role}`,
+        sk: `MSG#${String(turn.seq ?? 0).padStart(6, "0")}#${turn.at}`,
           type: "turn",
           interviewId,
           ...turn,
@@ -123,7 +123,10 @@ export class DynamoStore implements Store {
         },
       }),
     );
-    return (res.Items ?? []) as TranscriptTurn[];
+    return ((res.Items ?? []) as TranscriptTurn[]).sort((a, b) => {
+      if (a.seq != null && b.seq != null && a.seq !== b.seq) return a.seq - b.seq;
+      return a.at.localeCompare(b.at);
+    });
   }
 
   async appendEvent(interviewId: string, event: IntegrityEvent) {

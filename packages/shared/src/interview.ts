@@ -113,43 +113,15 @@ export function looksLikeVoiceHandoff(text: string): boolean {
   );
 }
 
-export function orderTranscriptTurns<T extends { role: "assistant" | "user" }>(turns: T[]): T[] {
-  const firstAssistant = turns.findIndex((t) => t.role === "assistant");
-  if (firstAssistant < 0) return [...turns];
-
-  const leadingUsers: T[] = [];
-  const rest: T[] = [];
-  for (let i = 0; i < turns.length; i++) {
-    if (i < firstAssistant && turns[i].role === "user") leadingUsers.push(turns[i]);
-    else rest.push(turns[i]);
-  }
-
-  const seeded: T[] = [];
-  for (let i = 0; i < rest.length; i++) {
-    seeded.push(rest[i]);
-    if (i === 0 && rest[i].role === "assistant" && leadingUsers.length) {
-      seeded.push(...leadingUsers);
-    }
-  }
-
-  const result: T[] = [];
-  for (const turn of seeded) {
-    if (turn.role !== "user") {
-      result.push(turn);
-      continue;
-    }
-    let insertAt = result.length;
-    while (
-      insertAt >= 2 &&
-      result[insertAt - 1]?.role === "assistant" &&
-      result[insertAt - 2]?.role === "assistant"
-    ) {
-      insertAt -= 1;
-    }
-    if (insertAt === 0 && result[0]?.role === "assistant") insertAt = 1;
-    result.splice(insertAt, 0, turn);
-  }
-  return result;
+export function orderTranscriptTurns<T extends { role: "assistant" | "user"; text?: string; seq?: number; at?: string }>(
+  turns: T[],
+): T[] {
+  return [...turns].sort((a, b) => {
+    if (a.seq != null && b.seq != null && a.seq !== b.seq) return a.seq - b.seq;
+    if (a.seq != null && b.seq == null) return -1;
+    if (a.seq == null && b.seq != null) return 1;
+    return (a.at ?? "").localeCompare(b.at ?? "");
+  });
 }
 
 export function extractQaPairs(

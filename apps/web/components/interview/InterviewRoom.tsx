@@ -44,46 +44,14 @@ function mergeAssistantText(previous: string, incoming: string): string | "skip"
   return "replace";
 }
 
-function upsertAssistantTurns(
-  prev: { role: "assistant" | "user"; text: string }[],
-  next: string,
-): { role: "assistant" | "user"; text: string }[] {
-  for (let i = prev.length - 1; i >= 0; i--) {
-    if (prev[i].role !== "assistant") continue;
-    const merged = mergeAssistantText(prev[i].text, next);
-    if (merged === "skip") return prev;
-    if (merged !== "replace") {
-      return prev
-        .map((turn, idx) => (idx === i ? { role: "assistant" as const, text: merged } : turn))
-        .filter((turn, idx) => {
-          if (idx <= i || turn.role !== "assistant") return true;
-          const again = mergeAssistantText(turn.text, merged);
-          return again === "replace";
-        });
-    }
-  }
-  return [...prev, { role: "assistant", text: next }];
-}
-
-function insertUserTurn(
-  prev: { role: "assistant" | "user"; text: string }[],
-  text: string,
-  assistantStreaming: boolean,
-): { role: "assistant" | "user"; text: string }[] {
-  const last = prev[prev.length - 1];
-  if (last?.role === "user" && last.text === text) return prev;
-  const assistantCount = prev.filter((turn) => turn.role === "assistant").length;
-  // Never place the candidate before Riley's intro.
-  if (assistantCount <= 1) {
-    return [...prev, { role: "user", text }];
-  }
-  const prev2 = prev[prev.length - 2];
-  const insertBeforeLast =
-    last?.role === "assistant" && (assistantStreaming || prev2?.role === "assistant");
-  if (insertBeforeLast) {
-    return [...prev.slice(0, -1), { role: "user", text }, last];
-  }
-  return [...prev, { role: "user", text }];
+function upsertLiveTurn(
+  prev: { role: "assistant" | "user"; text: string; seq: number }[],
+  next: { role: "assistant" | "user"; text: string; seq: number },
+): { role: "assistant" | "user"; text: string; seq: number }[] {
+  const idx = prev.findIndex((turn) => turn.seq === next.seq);
+  const updated =
+    idx >= 0 ? prev.map((turn, i) => (i === idx ? { ...turn, ...next } : turn)) : [...prev, next];
+  return updated.sort((a, b) => a.seq - b.seq);
 }
 
 function Equalizer({ active }: { active: boolean }) {
@@ -103,7 +71,7 @@ export function InterviewRoom({ token }: { token: string }) {
   const [phase, setPhase] = useState<Phase>("gate");
   const [remaining, setRemaining] = useState(CODING_DURATION_MS);
   const [lastAi, setLastAi] = useState("");
-  const [turns, setTurns] = useState<{ role: "assistant" | "user"; text: string }[]>([]);
+  const [turns, setTurns] = useState<{ role: "assistant" | "user"; text: string; seq: number }[]>([]);
   const [speaking, setSpeaking] = useState(false);
   const [waitingOnRiley, setWaitingOnRiley] = useState(false);
   const [code, setCode] = useState("");
@@ -124,12 +92,13 @@ export function InterviewRoom({ token }: { token: string }) {
   const transcriptEnd = useRef<HTMLDivElement>(null);
   const transcriptScroll = useRef<HTMLDivElement>(null);
   const connectedRef = useRef(false);
-  const lastTurnRef = useRef<{ role: "assistant" | "user"; text: string } | null>(null);
-  const lastAssistantPersistAt = useRef<string | null>(null);
-  const assistantPersistTimes = useRef<string[]>([]);
-  const pendingUserPersists = useRef<string[]>([]);
+  const lastTurnRef = useRef<{ role: "assistant" | "user"; text: string; seq: number } | null>(null);
+  const seqRef = useRef(0);
+  const assistantSeqRef = useRef<number | null>(null);
+  const openUserSeqRef = useRef<number | null>(null);
+  const userSeqQueue = useRef<number[]>([]);
   const assistantStreamingRef = useRef(false);
-  const turnsRef = useRef<{ role: "assistant" | "user"; text: string }[]>([]);
+  const turnsRef = useRef<{ role: "assistant" | "user"; text: string; seq: number }[]>([]);
   const timerStop = useRef<(() => void) | null>(null);
   const speakingRef = useRef(false);
   const phaseRef = useRef<Phase>("gate");
@@ -240,7 +209,13 @@ export function InterviewRoom({ token }: { token: string }) {
         if (isSpeaking) {
           setWaitingOnRiley(false);
           clearLeaveTimer();
+          if (!rileySpeakingRef.current && openUserSeqRef.current == null) {
+            seqRef.current += 1;
+            openUserSeqRef.current = seqRef.current;
+            userSeqQueue.current.push(seqRef.current);
+          }
         } else {
+          openUserSeqRef.current = null;
           tryLeaveVoice();
         }
       },
@@ -257,42 +232,27 @@ export function InterviewRoom({ token }: { token: string }) {
     });
   }
 
-  function persistTurn(role: "assistant" | "user", text: string, insertedBeforeAssistant = false) {
-    const write = (stamp: string, r: "assistant" | "user", body: string) => {
-      void api(`/session/${token}/turns`, {
-        method: "POST",
-        body: JSON.stringify({ role: r, text: body, at: stamp }),
-      });
-    };
+  function nextSeq() {
+    seqRef.current += 1;
+    return seqRef.current;
+  }
 
-    if (role === "assistant") {
-      const stamp = new Date().toISOString();
-      lastAssistantPersistAt.current = stamp;
-      assistantPersistTimes.current.push(stamp);
-      write(stamp, role, text);
-      const queued = pendingUserPersists.current.splice(0);
-      queued.forEach((pending, i) => {
-        write(new Date(Date.parse(stamp) + i + 1).toISOString(), "user", pending);
-      });
-      return;
-    }
+  function ensureAssistantSeq() {
+    if (assistantSeqRef.current == null) assistantSeqRef.current = nextSeq();
+    return assistantSeqRef.current;
+  }
 
-    if (!assistantPersistTimes.current.length) {
-      pendingUserPersists.current.push(text);
-      return;
-    }
+  function takeUserSeq() {
+    const queued = userSeqQueue.current.shift();
+    if (queued != null) return queued;
+    return nextSeq();
+  }
 
-    const times = assistantPersistTimes.current;
-    const lastA = times[times.length - 1];
-    let stamp = new Date().toISOString();
-    if (insertedBeforeAssistant && times.length >= 2) {
-      stamp = new Date(Date.parse(lastA) - 1).toISOString();
-      const prevA = times[times.length - 2];
-      if (stamp <= prevA) stamp = new Date(Date.parse(prevA) + 1).toISOString();
-    } else if (stamp <= lastA) {
-      stamp = new Date(Date.parse(lastA) + 1).toISOString();
-    }
-    write(stamp, role, text);
+  function persistTurn(role: "assistant" | "user", text: string, seq: number) {
+    void api(`/session/${token}/turns`, {
+      method: "POST",
+      body: JSON.stringify({ role, text, seq, at: new Date().toISOString() }),
+    });
   }
 
   function clearLeaveTimer() {
@@ -413,41 +373,43 @@ export function InterviewRoom({ token }: { token: string }) {
 
         if (role === "assistant") {
           assistantStreamingRef.current = partial;
-          const lastAssistant = lastTurnRef.current?.role === "assistant" ? lastTurnRef.current.text : null;
+          const seq = ensureAssistantSeq();
+          const existing = turnsRef.current.find((turn) => turn.seq === seq);
           let next = cleaned;
-          if (lastAssistant) {
-            const merged = mergeAssistantText(lastAssistant, cleaned);
+          if (existing) {
+            const merged = mergeAssistantText(existing.text, cleaned);
             if (merged === "skip") {
               if (!partial) {
-                persistTurn("assistant", lastAssistant);
-                noteAssistantHandoff(lastAssistant);
+                persistTurn("assistant", existing.text, seq);
+                assistantSeqRef.current = null;
+                noteAssistantHandoff(existing.text);
               }
               return;
             }
             if (merged !== "replace") next = merged;
           }
-          lastTurnRef.current = { role, text: next };
+          lastTurnRef.current = { role, text: next, seq };
           setLastAi(next);
           setWaitingOnRiley(false);
-          setTurns((prev) => {
-            const nextTurns = upsertAssistantTurns(prev, next);
-            turnsRef.current = nextTurns;
-            return nextTurns;
-          });
-          if (!partial) persistTurn("assistant", next);
+          const nextTurns = upsertLiveTurn(turnsRef.current, { role, text: next, seq });
+          turnsRef.current = nextTurns;
+          setTurns(nextTurns);
+          if (!partial) {
+            persistTurn("assistant", next, seq);
+            assistantSeqRef.current = null;
+          }
           noteAssistantHandoff(next, partial);
           return;
         }
 
-        const streaming = assistantStreamingRef.current;
+        const seq = takeUserSeq();
         const last = lastTurnRef.current;
-        if (last && last.role === role && last.text === cleaned) return;
-        lastTurnRef.current = { role, text: cleaned };
-        const nextTurns = insertUserTurn(turnsRef.current, cleaned, streaming);
-        const insertedBeforeAssistant = nextTurns[nextTurns.length - 1]?.role === "assistant";
+        if (last && last.role === role && last.text === cleaned && last.seq === seq) return;
+        lastTurnRef.current = { role, text: cleaned, seq };
+        const nextTurns = upsertLiveTurn(turnsRef.current, { role, text: cleaned, seq });
         turnsRef.current = nextTurns;
         setTurns(nextTurns);
-        persistTurn(role, cleaned, insertedBeforeAssistant);
+        persistTurn(role, cleaned, seq);
       };
 
       if (rt.clientSecret && camStream.current) {
@@ -463,8 +425,10 @@ export function InterviewRoom({ token }: { token: string }) {
           onAssistantSpeaking: (isSpeaking) => {
             rileySpeakingRef.current = isSpeaking;
             setRileyTalking(isSpeaking);
-            if (isSpeaking) setWaitingOnRiley(false);
-            else tryLeaveVoice();
+            if (isSpeaking) {
+              setWaitingOnRiley(false);
+              ensureAssistantSeq();
+            } else tryLeaveVoice();
           },
           onResponseDone: () => {
             rileySpeakingRef.current = false;
@@ -843,8 +807,8 @@ export function InterviewRoom({ token }: { token: string }) {
               {turns.length === 0 ? (
                 <p className="text-sm text-[var(--studio-muted)]">{AI_NAME} is getting ready…</p>
               ) : (
-                turns.map((t, i) => (
-                  <div key={i} className="flex items-start gap-3">
+                turns.map((t) => (
+                  <div key={t.seq} className="flex items-start gap-3">
                     <span className="mt-0.5 shrink-0">
                       <Avatar
                         name={t.role === "assistant" ? AI_NAME : youName}

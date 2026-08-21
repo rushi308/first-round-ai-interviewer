@@ -37,7 +37,11 @@ export class MemoryStore implements Store {
     this.turns.set(interviewId, list);
   }
   async listTurns(interviewId: string) {
-    return this.turns.get(interviewId) ?? [];
+    const list = this.turns.get(interviewId) ?? [];
+    return [...list].sort((a, b) => {
+      if (a.seq != null && b.seq != null && a.seq !== b.seq) return a.seq - b.seq;
+      return a.at.localeCompare(b.at);
+    });
   }
   async appendEvent(interviewId: string, event: IntegrityEvent) {
     const list = this.events.get(interviewId) ?? [];
