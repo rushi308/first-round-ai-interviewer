@@ -32,6 +32,7 @@ export async function connectOpenAiRealtime(opts: {
   let assistantBuf = "";
   let wrapNoteSent = false;
   let wrapResponseSent = false;
+  const pendingUser: string[] = [];
   const wrapLine = wrapUpLine(opts.includesCoding !== false);
   const openingTimeout = window.setTimeout(() => {
     openingDone = true;
@@ -83,6 +84,11 @@ export async function connectOpenAiRealtime(opts: {
       if (msg.type === "conversation.item.input_audio_transcription.completed" && msg.transcript) {
         const spoken = msg.transcript.trim();
         if (!spoken) return;
+        // Hold anything said during the opening so it cannot land before Riley's intro.
+        if (!openingDone) {
+          pendingUser.push(spoken);
+          return;
+        }
         opts.onTranscript("user", spoken);
       }
       if (msg.type === "response.done") {
@@ -93,6 +99,7 @@ export async function connectOpenAiRealtime(opts: {
         if (finalText) opts.onTranscript("assistant", finalText);
         setAssistantSpeaking(false);
         applyMicMute(false);
+        for (const spoken of pendingUser.splice(0)) opts.onTranscript("user", spoken);
         opts.onResponseDone?.();
       }
     } catch {

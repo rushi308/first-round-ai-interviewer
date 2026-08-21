@@ -72,6 +72,11 @@ function insertUserTurn(
 ): { role: "assistant" | "user"; text: string }[] {
   const last = prev[prev.length - 1];
   if (last?.role === "user" && last.text === text) return prev;
+  const assistantCount = prev.filter((turn) => turn.role === "assistant").length;
+  // Never place the candidate before Riley's intro.
+  if (assistantCount <= 1) {
+    return [...prev, { role: "user", text }];
+  }
   const prev2 = prev[prev.length - 2];
   const insertBeforeLast =
     last?.role === "assistant" && (assistantStreaming || prev2?.role === "assistant");
@@ -121,6 +126,8 @@ export function InterviewRoom({ token }: { token: string }) {
   const connectedRef = useRef(false);
   const lastTurnRef = useRef<{ role: "assistant" | "user"; text: string } | null>(null);
   const lastAssistantPersistAt = useRef<string | null>(null);
+  const assistantPersistTimes = useRef<string[]>([]);
+  const pendingUserPersists = useRef<string[]>([]);
   const assistantStreamingRef = useRef(false);
   const turnsRef = useRef<{ role: "assistant" | "user"; text: string }[]>([]);
   const timerStop = useRef<(() => void) | null>(null);
@@ -250,13 +257,42 @@ export function InterviewRoom({ token }: { token: string }) {
     });
   }
 
-  function persistTurn(role: "assistant" | "user", text: string, at?: string) {
-    const stamp = at ?? new Date().toISOString();
-    if (role === "assistant") lastAssistantPersistAt.current = stamp;
-    void api(`/session/${token}/turns`, {
-      method: "POST",
-      body: JSON.stringify({ role, text, at: stamp }),
-    });
+  function persistTurn(role: "assistant" | "user", text: string, insertedBeforeAssistant = false) {
+    const write = (stamp: string, r: "assistant" | "user", body: string) => {
+      void api(`/session/${token}/turns`, {
+        method: "POST",
+        body: JSON.stringify({ role: r, text: body, at: stamp }),
+      });
+    };
+
+    if (role === "assistant") {
+      const stamp = new Date().toISOString();
+      lastAssistantPersistAt.current = stamp;
+      assistantPersistTimes.current.push(stamp);
+      write(stamp, role, text);
+      const queued = pendingUserPersists.current.splice(0);
+      queued.forEach((pending, i) => {
+        write(new Date(Date.parse(stamp) + i + 1).toISOString(), "user", pending);
+      });
+      return;
+    }
+
+    if (!assistantPersistTimes.current.length) {
+      pendingUserPersists.current.push(text);
+      return;
+    }
+
+    const times = assistantPersistTimes.current;
+    const lastA = times[times.length - 1];
+    let stamp = new Date().toISOString();
+    if (insertedBeforeAssistant && times.length >= 2) {
+      stamp = new Date(Date.parse(lastA) - 1).toISOString();
+      const prevA = times[times.length - 2];
+      if (stamp <= prevA) stamp = new Date(Date.parse(prevA) + 1).toISOString();
+    } else if (stamp <= lastA) {
+      stamp = new Date(Date.parse(lastA) + 1).toISOString();
+    }
+    write(stamp, role, text);
   }
 
   function clearLeaveTimer() {
@@ -411,11 +447,7 @@ export function InterviewRoom({ token }: { token: string }) {
         const insertedBeforeAssistant = nextTurns[nextTurns.length - 1]?.role === "assistant";
         turnsRef.current = nextTurns;
         setTurns(nextTurns);
-        let at: string | undefined;
-        if (insertedBeforeAssistant && lastAssistantPersistAt.current) {
-          at = new Date(Date.parse(lastAssistantPersistAt.current) - 1).toISOString();
-        }
-        persistTurn(role, cleaned, at);
+        persistTurn(role, cleaned, insertedBeforeAssistant);
       };
 
       if (rt.clientSecret && camStream.current) {

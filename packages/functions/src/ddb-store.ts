@@ -103,7 +103,7 @@ export class DynamoStore implements Store {
         TableName: this.tableName,
         Item: {
           pk: `INTERVIEW#${interviewId}`,
-          sk: `MSG#${turn.at}`,
+        sk: `MSG#${turn.at}#${turn.role}`,
           type: "turn",
           interviewId,
           ...turn,
