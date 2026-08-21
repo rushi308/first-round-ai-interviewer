@@ -1,5 +1,6 @@
 import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedrock-runtime";
 import {
+  extractQaPairs,
   getCodingTask,
   jobIncludesCoding,
   orderTranscriptTurns,
@@ -7,6 +8,7 @@ import {
   type IntegrityEvent,
   type Interview,
   type Job,
+  type QaReviewItem,
   type Scorecard,
   type TranscriptTurn,
 } from "@ai-interviewer/shared";
@@ -47,6 +49,7 @@ function buildGradingPrompt(input: {
   job: Job;
   interview: Interview;
   turns: TranscriptTurn[];
+  pairs: { question: string; answer: string }[];
   events: IntegrityEvent[];
   integrity: number;
   includesCoding: boolean;
@@ -77,6 +80,16 @@ Automated flag — appears still on starter/TODOs: ${input.unsolved}
     : `This role has NO coding task. Do not invent a codeQuality score. Omit codeQuality from the JSON.
 - hireRecommendation: based on voice evidence only. lean_yes/yes still need meaningful, JD-relevant answers.`;
 
+  const pairBlock =
+    input.pairs.length === 0
+      ? "(no question/answer pairs extracted)"
+      : input.pairs
+          .map(
+            (p, i) =>
+              `${i + 1}. Question: ${p.question}\n   Candidate answer: ${p.answer}`,
+          )
+          .join("\n\n");
+
   return `You are an expert technical hiring interviewer for IT roles.
 Grade this candidate fairly and strictly from evidence only. Do not invent strengths that are not in the transcript or code.
 
@@ -91,26 +104,19 @@ Return ONLY valid JSON (no markdown) matching:
   "strengths": ["..."],
   "concerns": ["..."],
   "qaReview": [
-    {
-      "question": "the question Riley asked",
-      "answer": "what the candidate actually said (keep their wording; light cleanup only)",
-      "answerScore": 0-10,
-      "missed": ["substance they omitted vs a strong hire"],
-      "bestAnswer": "the actual strong technical answer used as the measuring stick"
-    }
+    { "question": "...", "answer": "...", "answerScore": 0-10, "missed": ["..."], "bestAnswer": "..." },
+    { "question": "...", "answer": "...", "answerScore": 0-10, "missed": ["..."], "bestAnswer": "..." }
   ]
 }
 
 Scoring guidance:
 - technical: correctness/depth of spoken answers vs the JD and seniority. Thin or missing answers must score low. Grade a Junior more gently than Staff.
 - communication: clarity, structure, relevance — not friendliness alone.
-- codeQuality: compare submitted code to the starter and task. Unchanged starter / leftover TODOs = 0-2. Partial attempt = 3-5. Working solution = 6-9. Excellent = 10.
 - integrity: start from the hint (${input.integrity}); lower for many tab_hidden, fullscreen_exit, no_face, multi_face, paste_attempt events.
-- qaReview: one item per substantive question Riley asked. Skip greetings and wrap-up lines.
-- qaReview.answer: quote or faithfully summarize what THIS candidate said. Do not replace it with a model answer. Do not polish their wording.
+- qaReview MUST contain EXACTLY ${input.pairs.length} items, one per numbered pair below, in the same order. Do not skip, merge, or stop after the first. Copy question and answer from each pair.
 - qaReview.answerScore: grade CONTENT only vs a strong ${input.job.seniority ?? "mid"} hire for this JD. Fluency/wording does not raise the score. Vague, incomplete, or wrong answers score low even if they "sound fine".
-- qaReview.missed: 2-5 bullets of technical substance in a strong answer that they did not cover (concepts, steps, tradeoffs, failure modes, metrics, constraints). Empty only if the answer was already complete.
-- qaReview.bestAnswer: the measuring-stick answer for THIS question — what a strong ${input.job.seniority ?? "mid"} hire would actually say. Cover real technical content: approach, key steps, tradeoffs, failure modes, and how you'd know it worked. Calibrate to the JD. Do NOT rephrase the candidate. If they were on a valid track, you may keep that approach but you must add the missing substance. If they were shallow or wrong, write the correct answer. 5-10 sentences, first person, spoken interview style.
+- qaReview.missed: 2-4 short bullets of technical substance a strong answer includes that they did not cover. Empty only if the answer was already complete.
+- qaReview.bestAnswer: the measuring-stick answer for THAT pair — what a strong ${input.job.seniority ?? "mid"} hire would actually say (approach, key steps, tradeoffs, failure modes). Do NOT rephrase the candidate. 3-6 sentences. Keep each bestAnswer compact so every pair is graded.
 ${codingBlock}
 
 Job title: ${input.job.title}
@@ -118,12 +124,127 @@ Seniority: ${input.job.seniority ?? "mid"}
 Job description:
 ${input.job.description}
 
-Interview transcript (assistant = AI interviewer, user = candidate):
+Required question/answer pairs (${input.pairs.length} — grade ALL of them):
+${pairBlock}
+
+Full transcript (assistant = AI interviewer, user = candidate):
 ${input.turns.map((t) => `${t.role}: ${t.text}`).join("\n") || "(no transcript captured)"}
 
 Integrity events:
 ${input.events.map((e) => `${e.at} ${e.type}${e.detail ? ` ${e.detail}` : ""}`).join("\n") || "(none)"}
 `;
+}
+
+function mergeQaReview(
+  pairs: { question: string; answer: string }[],
+  reviews: QaReviewItem[] | undefined,
+): QaReviewItem[] {
+  if (!pairs.length) return reviews ?? [];
+  const list = reviews ?? [];
+  return pairs.map((pair, i) => {
+    const hit = list[i];
+    return {
+      question: pair.question,
+      answer: pair.answer || hit?.answer || "(no answer)",
+      bestAnswer: hit?.bestAnswer ?? "",
+      ...(hit?.answerScore != null ? { answerScore: hit.answerScore } : {}),
+      missed: hit?.missed ?? [],
+    };
+  });
+}
+
+function buildQaChunkPrompt(
+  job: Job,
+  pairs: { question: string; answer: string }[],
+): string {
+  const pairBlock = pairs
+    .map((p, i) => `${i + 1}. Question: ${p.question}\n   Candidate answer: ${p.answer}`)
+    .join("\n\n");
+  return `You are an expert technical hiring interviewer.
+For EACH numbered pair, write a real measuring-stick answer a strong ${job.seniority ?? "mid"} hire would give for this role. Do not rephrase the candidate. Grade content, not wording.
+
+Job title: ${job.title}
+Seniority: ${job.seniority ?? "mid"}
+Job description:
+${job.description}
+
+Return ONLY JSON:
+{
+  "qaReview": [
+    {
+      "question": "copy from pair",
+      "answer": "copy from pair",
+      "answerScore": 0-10,
+      "missed": ["key technical point they omitted"],
+      "bestAnswer": "3-6 sentence spoken answer with approach, steps, tradeoffs, failure modes"
+    }
+  ]
+}
+
+qaReview MUST have EXACTLY ${pairs.length} items, in the same order. Every item MUST include a non-empty bestAnswer.
+
+Pairs:
+${pairBlock}`;
+}
+
+async function gradeQaChunk(
+  job: Job,
+  pairs: { question: string; answer: string }[],
+  openaiKey?: string,
+): Promise<QaReviewItem[]> {
+  if (!pairs.length) return [];
+  const prompt = buildQaChunkPrompt(job, pairs);
+  try {
+    const card = await gradeWithBedrock(prompt, 0, false);
+    if (card.qaReview?.length) return card.qaReview;
+  } catch (err) {
+    console.error("Bedrock Q&A chunk failed", err);
+  }
+  if (openaiKey) {
+    try {
+      const card = await gradeWithOpenAi(openaiKey, prompt, 0, false);
+      if (card.qaReview?.length) return card.qaReview;
+    } catch (err) {
+      console.error("OpenAI Q&A chunk failed", err);
+    }
+  }
+  return [];
+}
+
+async function ensureStrongAnswers(
+  job: Job,
+  pairs: { question: string; answer: string }[],
+  reviews: QaReviewItem[] | undefined,
+  openaiKey?: string,
+): Promise<QaReviewItem[]> {
+  let merged = mergeQaReview(pairs, reviews);
+  const chunkSize = 2;
+  for (let pass = 0; pass < 12; pass++) {
+    const missing = merged
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => !item.bestAnswer.trim());
+    if (!missing.length) break;
+    const chunk = missing.slice(0, chunkSize);
+    const filled = await gradeQaChunk(
+      job,
+      chunk.map(({ index }) => pairs[index]),
+      openaiKey,
+    );
+    let wrote = false;
+    chunk.forEach(({ index }, j) => {
+      const hit = filled[j];
+      if (!hit?.bestAnswer?.trim()) return;
+      wrote = true;
+      merged[index] = {
+        ...merged[index],
+        bestAnswer: hit.bestAnswer.trim(),
+        answerScore: hit.answerScore ?? merged[index].answerScore,
+        missed: hit.missed?.length ? hit.missed : merged[index].missed,
+      };
+    });
+    if (!wrote) break;
+  }
+  return merged;
 }
 
 function parseScorecard(text: string, integrityFallback: number, includesCoding: boolean): Scorecard {
@@ -132,6 +253,12 @@ function parseScorecard(text: string, integrityFallback: number, includesCoding:
   const end = cleaned.lastIndexOf("}");
   const json = JSON.parse(start >= 0 ? cleaned.slice(start, end + 1) : cleaned);
   return scorecardSchema.parse({
+    technical: 0,
+    communication: 0,
+    hireRecommendation: "no",
+    summary: "",
+    strengths: [],
+    concerns: [],
     ...json,
     integrity: typeof json.integrity === "number" ? json.integrity : integrityFallback,
     codeQuality: includesCoding
@@ -184,12 +311,13 @@ async function gradeWithOpenAi(
     body: JSON.stringify({
       model,
       temperature: 0.2,
+      max_tokens: 8000,
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content:
-            "You grade technical interviews. Be evidence-based and strict. Output JSON only. For each question, score content vs a strong hire, list what they missed, and write a real model answer — never just a nicer rephrase.",
+            "You grade technical interviews. Be evidence-based and strict. Output JSON only. qaReview must include every numbered question/answer pair — never only the first.",
         },
         { role: "user", content: prompt },
       ],
@@ -217,7 +345,7 @@ async function gradeWithBedrock(prompt: string, integrity: number, includesCodin
       accept: "application/json",
       body: JSON.stringify({
         anthropic_version: "bedrock-2023-05-31",
-        max_tokens: 3500,
+        max_tokens: 8000,
         messages: [{ role: "user", content: prompt }],
       }),
     }),
@@ -235,6 +363,7 @@ function emergencyHeuristic(input: {
   includesCoding: boolean;
   unsolved: boolean;
   integrity: number;
+  pairs: { question: string; answer: string }[];
 }): ScoredResult {
   return {
     technical: Math.min(3, input.answered),
@@ -246,7 +375,7 @@ function emergencyHeuristic(input: {
       "Emergency fallback only — AI grading failed. Do not trust these numbers; re-run scoring after fixing OpenAI/Bedrock access.",
     strengths: [],
     concerns: ["AI grading unavailable"],
-    qaReview: [],
+    qaReview: mergeQaReview(input.pairs, []),
     gradedBy: "heuristic",
   };
 }
@@ -273,11 +402,13 @@ export async function scoreInterview(input: {
     (t) => t.role === "user" && t.text.trim().length >= 40,
   ).length;
   const turns = orderTranscriptTurns(input.turns);
+  const pairs = extractQaPairs(turns);
 
   const prompt = buildGradingPrompt({
     job: input.job,
     interview: input.interview,
     turns,
+    pairs,
     events: input.events,
     integrity,
     includesCoding,
@@ -287,10 +418,17 @@ export async function scoreInterview(input: {
     starter: task?.starter ?? "",
   });
 
-  const withStarterGuard = (card: Scorecard, gradedBy: ScoreSource): ScoredResult => {
+  const openaiKey = input.openaiKey || process.env.OPENAI_API_KEY;
+
+  const withStarterGuard = async (
+    card: Scorecard,
+    gradedBy: ScoreSource,
+  ): Promise<ScoredResult> => {
+    const qaReview = await ensureStrongAnswers(input.job, pairs, card.qaReview, openaiKey);
     if (includesCoding && unsolved && (card.codeQuality ?? 0) > 3) {
       return {
         ...card,
+        qaReview,
         codeQuality: Math.min(card.codeQuality ?? 0, 2),
         hireRecommendation:
           card.hireRecommendation === "yes" || card.hireRecommendation === "lean_yes"
@@ -301,29 +439,32 @@ export async function scoreInterview(input: {
       };
     }
     if (!includesCoding) {
-      return { ...card, codeQuality: undefined, gradedBy };
+      return { ...card, codeQuality: undefined, qaReview, gradedBy };
     }
-    return { ...card, gradedBy };
+    return { ...card, qaReview, gradedBy };
   };
 
   // Primary: Bedrock Claude (AWS-native)
   try {
     const card = await gradeWithBedrock(prompt, integrity, includesCoding);
-    return withStarterGuard(card, "bedrock");
+    return await withStarterGuard(card, "bedrock");
   } catch (err) {
     console.error("Bedrock grading failed", err);
   }
 
   // Backup: OpenAI
-  const openaiKey = input.openaiKey || process.env.OPENAI_API_KEY;
   if (openaiKey) {
     try {
       const card = await gradeWithOpenAi(openaiKey, prompt, integrity, includesCoding);
-      return withStarterGuard(card, "openai");
+      return await withStarterGuard(card, "openai");
     } catch (err) {
       console.error("OpenAI grading failed", err);
     }
   }
 
-  return emergencyHeuristic({ answered, includesCoding, unsolved, integrity });
+  const fallback = emergencyHeuristic({ answered, includesCoding, unsolved, integrity, pairs });
+  return {
+    ...fallback,
+    qaReview: await ensureStrongAnswers(input.job, pairs, fallback.qaReview, openaiKey),
+  };
 }

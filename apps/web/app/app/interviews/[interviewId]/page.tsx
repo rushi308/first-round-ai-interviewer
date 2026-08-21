@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   SENIORITY_LABELS,
+  extractQaPairs,
   jobIncludesCoding,
   orderTranscriptTurns,
   type IntegrityEvent,
@@ -58,6 +59,20 @@ export default function ScorecardPage() {
   const turns = orderTranscriptTurns(data.turns);
   const s = interview.scorecard;
   const includesCoding = job ? jobIncludesCoding(job) : Boolean(interview.codingTask);
+  const qaPairs = extractQaPairs(turns);
+  const qaReview =
+    qaPairs.length > 0
+      ? qaPairs.map((pair, i) => {
+          const hit = s?.qaReview?.[i];
+          return {
+            question: pair.question,
+            answer: pair.answer || hit?.answer || "(no answer)",
+            bestAnswer: hit?.bestAnswer ?? "",
+            answerScore: hit?.answerScore,
+            missed: hit?.missed ?? [],
+          };
+        })
+      : (s?.qaReview ?? []);
   const recLabel: Record<string, string> = {
     yes: "Hire",
     lean_yes: "Lean hire",
@@ -145,14 +160,14 @@ export default function ScorecardPage() {
         </div>
       )}
 
-      {s?.qaReview?.length ? (
+      {qaReview.length ? (
         <section className="mt-8">
           <h2 className="text-lg font-semibold">Questions & answers</h2>
           <p className="mt-1 text-sm text-[var(--studio-muted)]">
-            Each answer is scored against a strong hire for this role — not against nicer wording.
+            {qaReview.length} question{qaReview.length === 1 ? "" : "s"} from the transcript, each scored against a strong hire — not nicer wording.
           </p>
           <div className="mt-4 space-y-4">
-            {s.qaReview.map((item, i) => (
+            {qaReview.map((item, i) => (
               <article key={`${item.question}-${i}`} className="card p-5">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
@@ -182,17 +197,17 @@ export default function ScorecardPage() {
                       </ul>
                     </div>
                   ) : null}
-                  {item.bestAnswer ? (
-                    <div className="rounded-2xl border border-[#143d2e] bg-[#0d1f18] px-4 py-3">
-                      <p className="text-xs font-semibold text-[var(--good)]">
-                        Strong answer (measuring stick)
-                      </p>
-                      <p className="mt-0.5 text-[11px] text-[var(--studio-muted)]">
-                        What a strong hire would actually say — used to score the answer above.
-                      </p>
-                      <p className="mt-1.5 text-sm leading-relaxed">{item.bestAnswer}</p>
-                    </div>
-                  ) : null}
+                  <div className="rounded-2xl border border-[#143d2e] bg-[#0d1f18] px-4 py-3">
+                    <p className="text-xs font-semibold text-[var(--good)]">
+                      Strong answer (measuring stick)
+                    </p>
+                    <p className="mt-0.5 text-[11px] text-[var(--studio-muted)]">
+                      What a strong hire would actually say — used to score the answer above.
+                    </p>
+                    <p className="mt-1.5 text-sm leading-relaxed">
+                      {item.bestAnswer || "Re-run the scorecard to generate a strong answer for this question."}
+                    </p>
+                  </div>
                 </div>
               </article>
             ))}

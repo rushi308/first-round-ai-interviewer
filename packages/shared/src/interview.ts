@@ -117,14 +117,53 @@ export function orderTranscriptTurns<T extends { role: "assistant" | "user" }>(t
   const result: T[] = [];
   for (const turn of turns) {
     if (turn.role === "user") {
-      const last = result[result.length - 1];
-      const prev = result[result.length - 2];
-      if (last?.role === "assistant" && prev?.role === "assistant") {
-        result.splice(result.length - 1, 0, turn);
-        continue;
+      let insertAt = result.length;
+      while (
+        insertAt >= 2 &&
+        result[insertAt - 1]?.role === "assistant" &&
+        result[insertAt - 2]?.role === "assistant"
+      ) {
+        insertAt -= 1;
       }
+      result.splice(insertAt, 0, turn);
+      continue;
     }
     result.push(turn);
   }
   return result;
 }
+
+export function extractQaPairs(
+  turns: { role: "assistant" | "user"; text: string }[],
+): { question: string; answer: string }[] {
+  const ordered = orderTranscriptTurns(turns);
+  const pairs: { question: string; answer: string }[] = [];
+  let question = "";
+  let answer = "";
+
+  const flush = () => {
+    if (question.trim() && answer.trim()) {
+      pairs.push({ question: question.trim(), answer: answer.trim() });
+    }
+    question = "";
+    answer = "";
+  };
+
+  for (const turn of ordered) {
+    const text = turn.text.trim();
+    if (!text) continue;
+    if (turn.role === "assistant") {
+      if (looksLikeVoiceHandoff(text)) {
+        flush();
+        continue;
+      }
+      if (answer) flush();
+      question = question ? `${question} ${text}` : text;
+    } else {
+      answer = answer ? `${answer} ${text}` : text;
+    }
+  }
+  flush();
+  return pairs;
+}
+
