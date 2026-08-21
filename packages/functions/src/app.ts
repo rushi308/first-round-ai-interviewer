@@ -350,23 +350,34 @@ export function createApp(env: AppEnv) {
     if (!interview) return c.json({ error: "not_found" }, 404);
     const job = await env.store.getJob(interview.jobId);
     if (!job) return c.json({ error: "job_missing" }, 404);
+    const previousStatus = interview.status;
     interview.status = "scoring";
     await env.store.putInterview(interview);
-    const [turns, events] = await Promise.all([
-      env.store.listTurns(interview.interviewId),
-      env.store.listEvents(interview.interviewId),
-    ]);
-    const scorecard = await scoreInterview({
-      job,
-      interview,
-      turns,
-      events,
-      openaiKey: env.openaiKey,
-    });
-    interview.scorecard = scorecard;
-    interview.status = "scored";
-    await env.store.putInterview(interview);
-    return c.json({ interview, scorecard, gradedBy: scorecard.gradedBy });
+    try {
+      const [turns, events] = await Promise.all([
+        env.store.listTurns(interview.interviewId),
+        env.store.listEvents(interview.interviewId),
+      ]);
+      const scorecard = await scoreInterview({
+        job,
+        interview,
+        turns,
+        events,
+        openaiKey: env.openaiKey,
+      });
+      interview.scorecard = scorecard;
+      interview.status = "scored";
+      await env.store.putInterview(interview);
+      return c.json({ interview, scorecard, gradedBy: scorecard.gradedBy });
+    } catch (err) {
+      console.error("score_endpoint_failed", err);
+      interview.status = previousStatus === "scoring" ? "completed" : previousStatus;
+      await env.store.putInterview(interview).catch((putErr) => console.error("score_status_reset_failed", putErr));
+      return c.json(
+        { error: "scoring_failed", detail: err instanceof Error ? err.message : "unknown" },
+        500,
+      );
+    }
   });
 
   return app;
