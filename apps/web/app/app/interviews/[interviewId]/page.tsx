@@ -149,7 +149,7 @@ export default function ScorecardPage() {
         <section className="mt-8">
           <h2 className="text-lg font-semibold">Questions & answers</h2>
           <p className="mt-1 text-sm text-[var(--studio-muted)]">
-            What Riley asked, what the candidate said, and a strong model answer for comparison.
+            What Riley asked, what they said, and a sample best answer built from their response.
           </p>
           <div className="mt-4 space-y-4">
             {s.qaReview.map((item, i) => (
@@ -158,15 +158,22 @@ export default function ScorecardPage() {
                   Question {i + 1}
                 </p>
                 <p className="mt-1 font-medium leading-relaxed">{item.question}</p>
-                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <div className="mt-4 space-y-3">
                   <div className="rounded-2xl bg-black/20 px-4 py-3">
                     <p className="text-xs font-semibold text-[var(--studio-muted)]">Candidate answer</p>
                     <p className="mt-1.5 text-sm leading-relaxed">{item.answer || "(no answer)"}</p>
                   </div>
-                  <div className="rounded-2xl bg-black/20 px-4 py-3">
-                    <p className="text-xs font-semibold text-[var(--good)]">Suggested best answer</p>
-                    <p className="mt-1.5 text-sm leading-relaxed">{item.bestAnswer}</p>
-                  </div>
+                  {item.bestAnswer ? (
+                    <div className="rounded-2xl border border-[#143d2e] bg-[#0d1f18] px-4 py-3">
+                      <p className="text-xs font-semibold text-[var(--good)]">
+                        Sample best answer
+                      </p>
+                      <p className="mt-0.5 text-[11px] text-[var(--studio-muted)]">
+                        Strong version of this answer — keeps their points and fills the gaps.
+                      </p>
+                      <p className="mt-1.5 text-sm leading-relaxed">{item.bestAnswer}</p>
+                    </div>
+                  ) : null}
                 </div>
               </article>
             ))}

@@ -93,8 +93,8 @@ Return ONLY valid JSON (no markdown) matching:
   "qaReview": [
     {
       "question": "the question Riley asked",
-      "answer": "what the candidate actually said (paraphrase only if needed)",
-      "bestAnswer": "a strong, seniority-calibrated model answer the recruiter can compare against"
+      "answer": "what the candidate actually said (keep their wording; light cleanup only)",
+      "bestAnswer": "a sample spoken answer in first person, built FROM their answer"
     }
   ]
 }
@@ -104,7 +104,9 @@ Scoring guidance:
 - communication: clarity, structure, relevance — not friendliness alone.
 - codeQuality: compare submitted code to the starter and task. Unchanged starter / leftover TODOs = 0-2. Partial attempt = 3-5. Working solution = 6-9. Excellent = 10.
 - integrity: start from the hint (${input.integrity}); lower for many tab_hidden, fullscreen_exit, no_face, multi_face, paste_attempt events.
-- qaReview: one item per substantive question Riley asked. Skip greetings and wrap-up lines. If the candidate did not answer, set answer to "(no answer)" and still provide bestAnswer.
+- qaReview: one item per substantive question Riley asked. Skip greetings and wrap-up lines.
+- qaReview.answer: quote or faithfully summarize what THIS candidate said. Do not replace it with a model answer.
+- qaReview.bestAnswer: write a sample best answer AS IF this candidate had answered strongly. Start from their actual points: keep what they got right, then add the missing structure, specifics, tradeoffs, and seniority-calibrated depth. Write it in first person as a spoken interview answer (4–8 sentences). Do not invent jobs, companies, or tools they never mentioned. If they said nothing, write a standalone model answer for this seniority and JD.
 ${codingBlock}
 
 Job title: ${input.job.title}
@@ -136,10 +138,18 @@ function parseScorecard(text: string, integrityFallback: number, includesCoding:
     qaReview: Array.isArray(json.qaReview)
       ? json.qaReview
           .filter((item: { question?: unknown }) => typeof item?.question === "string")
-          .map((item: { question?: unknown; answer?: unknown; bestAnswer?: unknown }) => ({
+          .map((item: {
+            question?: unknown;
+            answer?: unknown;
+            bestAnswer?: unknown;
+            sampleBestAnswer?: unknown;
+            improvedAnswer?: unknown;
+          }) => ({
             question: String(item.question ?? ""),
             answer: String(item.answer ?? "(no answer)"),
-            bestAnswer: String(item.bestAnswer ?? ""),
+            bestAnswer: String(
+              item.bestAnswer || item.sampleBestAnswer || item.improvedAnswer || "",
+            ),
           }))
       : [],
   });
@@ -166,7 +176,7 @@ async function gradeWithOpenAi(
         {
           role: "system",
           content:
-            "You grade technical interviews. Be evidence-based and strict. Output JSON only.",
+            "You grade technical interviews. Be evidence-based and strict. Output JSON only. For each question, include a sample bestAnswer rewritten from what the candidate actually said.",
         },
         { role: "user", content: prompt },
       ],
