@@ -5,6 +5,8 @@ import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   SENIORITY_LABELS,
+  jobIncludesCoding,
+  orderTranscriptTurns,
   type IntegrityEvent,
   type Interview,
   type Job,
@@ -52,8 +54,10 @@ export default function ScorecardPage() {
   if (!data) {
     return <main className="p-10 text-[var(--studio-muted)]">Loading…</main>;
   }
-  const { interview, job, turns, events } = data;
+  const { interview, job, events } = data;
+  const turns = orderTranscriptTurns(data.turns);
   const s = interview.scorecard;
+  const includesCoding = job ? jobIncludesCoding(job) : Boolean(interview.codingTask);
   const recLabel: Record<string, string> = {
     yes: "Hire",
     lean_yes: "Lean hire",
@@ -88,19 +92,21 @@ export default function ScorecardPage() {
       </div>
 
       {s ? (
-        <section className="mt-8 grid gap-4 md:grid-cols-4">
-          {[
+        <section className={`mt-8 grid gap-4 ${includesCoding && s.codeQuality != null ? "md:grid-cols-4" : "md:grid-cols-3"}`}>
+          {([
             ["Technical", s.technical],
             ["Communication", s.communication],
-            ["Code", s.codeQuality],
+            ...(includesCoding && s.codeQuality != null
+              ? ([["Code", s.codeQuality]] as [string, number][])
+              : []),
             ["Integrity", s.integrity],
-          ].map(([label, value]) => (
+          ] as [string, number][]).map(([label, value]) => (
             <div key={String(label)} className="card p-5">
               <p className="text-sm text-[var(--studio-muted)]">{label}</p>
               <p className="mt-1 text-3xl font-semibold tracking-tight">{value}/10</p>
             </div>
           ))}
-          <div className="card p-6 md:col-span-4">
+          <div className={`card p-6 ${includesCoding && s.codeQuality != null ? "md:col-span-4" : "md:col-span-3"}`}>
             <div className="flex flex-wrap items-center gap-3">
               <span className="badge">{recLabel[s.hireRecommendation] ?? s.hireRecommendation}</span>
               {s.gradedBy ? (
@@ -134,10 +140,39 @@ export default function ScorecardPage() {
         </section>
       ) : (
         <div className="card mt-8 p-8 text-[var(--studio-muted)]">
-          Run the scorecard after the candidate finishes. Riley grades voice answers against the JD and
-          the coding submission against the starter.
+          Run the scorecard after the candidate finishes. Riley grades voice answers against the JD
+          {includesCoding ? " and the coding submission against the starter" : ""}.
         </div>
       )}
+
+      {s?.qaReview?.length ? (
+        <section className="mt-8">
+          <h2 className="text-lg font-semibold">Questions & answers</h2>
+          <p className="mt-1 text-sm text-[var(--studio-muted)]">
+            What Riley asked, what the candidate said, and a strong model answer for comparison.
+          </p>
+          <div className="mt-4 space-y-4">
+            {s.qaReview.map((item, i) => (
+              <article key={`${item.question}-${i}`} className="card p-5">
+                <p className="text-xs font-semibold uppercase tracking-wide text-[#9cb8ff]">
+                  Question {i + 1}
+                </p>
+                <p className="mt-1 font-medium leading-relaxed">{item.question}</p>
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  <div className="rounded-2xl bg-black/20 px-4 py-3">
+                    <p className="text-xs font-semibold text-[var(--studio-muted)]">Candidate answer</p>
+                    <p className="mt-1.5 text-sm leading-relaxed">{item.answer || "(no answer)"}</p>
+                  </div>
+                  <div className="rounded-2xl bg-black/20 px-4 py-3">
+                    <p className="text-xs font-semibold text-[var(--good)]">Suggested best answer</p>
+                    <p className="mt-1.5 text-sm leading-relaxed">{item.bestAnswer}</p>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="mt-8 grid gap-6 md:grid-cols-2">
         <div className="card p-5">
@@ -180,7 +215,7 @@ export default function ScorecardPage() {
         </div>
       </section>
 
-      {interview.submittedCode ? (
+      {includesCoding && interview.submittedCode ? (
         <pre className="mono mt-8 overflow-auto rounded-3xl border border-[var(--studio-line)] bg-[#0c0f14] p-5 text-sm">
           {interview.submittedCode}
         </pre>

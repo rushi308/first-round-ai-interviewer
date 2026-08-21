@@ -1,6 +1,6 @@
 # FirstRound
 
-Standalone TypeScript monorepo: Next.js recruiter + candidate app, AWS CDK serverless backend. **Riley** runs a 5-minute voice interview then a 5-minute coding task. Invites are **copyable links** (no SES).
+Standalone TypeScript monorepo: Next.js recruiter + candidate app, AWS CDK serverless backend. **Riley** runs a 15–20 minute voice interview, with an optional 5-minute coding task. Invites are **copyable links** (no SES).
 
 ## Layout
 
@@ -22,7 +22,7 @@ pnpm --filter @ai-interviewer/web dev         # UI on :3000
 
 1. Open http://localhost:3000 (landing) or `/login` (any email/password in local auth mode).
 2. Create a role, invite a candidate, **copy the interview URL**.
-3. Open the URL, grant camera/mic/screen/fullscreen, complete voice + coding with Riley.
+3. Open the URL, grant camera/mic/fullscreen (and screen share if the role includes coding), complete the interview with Riley.
 
 Without `OPENAI_API_KEY`, voice uses a browser speech-synthesis mock interviewer. With a key:
 

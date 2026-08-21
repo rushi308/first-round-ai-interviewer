@@ -10,6 +10,7 @@ import {
   getCodingTask,
   integrityEventSchema,
   interviewerInstructions,
+  jobIncludesCoding,
   OPENAI_REALTIME_FLAGSHIP_MODEL,
   OPENAI_REALTIME_MINI_MODEL,
   transcriptTurnSchema,
@@ -56,20 +57,40 @@ export function createApp(env: AppEnv) {
 
   app.get("/health", (c) => c.json({ ok: true }));
 
+  async function emitInterviewCompleted(interviewId: string) {
+    if (!env.eventBusName) return;
+    await new EventBridgeClient({}).send(
+      new PutEventsCommand({
+        Entries: [
+          {
+            EventBusName: env.eventBusName,
+            Source: "ai-interviewer",
+            DetailType: "interview.completed",
+            Detail: JSON.stringify({ interviewId }),
+          },
+        ],
+      }),
+    );
+  }
+
   app.post("/jobs", async (c) => {
     const body = createJobInput.parse(await c.req.json());
     const seniority = body.seniority ?? "mid";
-    const codingTask = await generateCodingTask({
-      title: body.title,
-      description: body.description,
-      seniority,
-      openaiKey: env.openaiKey,
-    });
+    const codingRequired = body.codingRequired !== false;
+    const codingTask = codingRequired
+      ? await generateCodingTask({
+          title: body.title,
+          description: body.description,
+          seniority,
+          openaiKey: env.openaiKey,
+        })
+      : undefined;
     const job: Job = {
       title: body.title,
       description: body.description,
       seniority,
-      codingTask,
+      codingRequired,
+      ...(codingTask ? { codingTask } : {}),
       jobId: id("job"),
       createdAt: new Date().toISOString(),
     };
@@ -100,12 +121,16 @@ export function createApp(env: AppEnv) {
       token: interviewToken,
       status: "created",
       createdAt: new Date().toISOString(),
-      codingTask: await generateCodingTask({
-        title: job.title,
-        description: job.description,
-        seniority: job.seniority ?? "mid",
-        openaiKey: env.openaiKey,
-      }),
+      ...(jobIncludesCoding(job)
+        ? {
+            codingTask: await generateCodingTask({
+              title: job.title,
+              description: job.description,
+              seniority: job.seniority ?? "mid",
+              openaiKey: env.openaiKey,
+            }),
+          }
+        : {}),
     };
     await env.store.putInterview(interview);
     return c.json({
@@ -133,7 +158,8 @@ export function createApp(env: AppEnv) {
     const job = await env.store.getJob(interview.jobId);
     if (!job) return c.json({ error: "job_missing" }, 404);
     const seniority = job.seniority ?? "mid";
-    if (!interview.codingTask) {
+    const includesCoding = jobIncludesCoding(job);
+    if (includesCoding && !interview.codingTask) {
       interview.codingTask = await generateCodingTask({
         title: job.title,
         description: job.description,
@@ -142,7 +168,9 @@ export function createApp(env: AppEnv) {
       });
       await env.store.putInterview(interview);
     }
-    const task = getCodingTask({ codingTask: interview.codingTask, seniority });
+    const task = includesCoding
+      ? getCodingTask({ codingTask: interview.codingTask, seniority })
+      : null;
     return c.json({
       interview: { ...interview, token: undefined },
       job: {
@@ -150,8 +178,11 @@ export function createApp(env: AppEnv) {
         title: job.title,
         description: job.description,
         seniority,
+        codingRequired: includesCoding,
       },
-      task: { title: task.title, prompt: task.prompt, starter: task.starter, language: task.language },
+      task: task
+        ? { title: task.title, prompt: task.prompt, starter: task.starter, language: task.language }
+        : null,
     });
   });
 
@@ -171,6 +202,7 @@ export function createApp(env: AppEnv) {
     interview.status = phase;
     if (phase === "completed") interview.completedAt = new Date().toISOString();
     await env.store.putInterview(interview);
+    if (phase === "completed") await emitInterviewCompleted(interview.interviewId);
     return c.json({ ok: true, status: interview.status });
   });
 
@@ -198,20 +230,7 @@ export function createApp(env: AppEnv) {
     interview.status = "completed";
     interview.completedAt = new Date().toISOString();
     await env.store.putInterview(interview);
-    if (env.eventBusName) {
-      await new EventBridgeClient({}).send(
-        new PutEventsCommand({
-          Entries: [
-            {
-              EventBusName: env.eventBusName,
-              Source: "ai-interviewer",
-              DetailType: "interview.completed",
-              Detail: JSON.stringify({ interviewId: interview.interviewId }),
-            },
-          ],
-        }),
-      );
-    }
+    await emitInterviewCompleted(interview.interviewId);
     return c.json({ ok: true });
   });
 
@@ -229,6 +248,7 @@ export function createApp(env: AppEnv) {
       jobTitle: job.title,
       jobDescription: job.description,
       seniority: job.seniority ?? "mid",
+      includesCoding: jobIncludesCoding(job),
     });
 
     if (!env.openaiKey) {

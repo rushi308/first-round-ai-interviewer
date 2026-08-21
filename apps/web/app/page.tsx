@@ -15,13 +15,13 @@ export default function HomePage() {
 
       <section className="mx-auto grid max-w-6xl items-center gap-12 px-6 pb-16 pt-6 lg:grid-cols-[1fr_1.05fr]">
         <div>
-          <p className="badge">IT hiring · 10-minute screens</p>
+            <p className="badge">IT hiring · 15–20 minute screens</p>
           <h1 className="mt-5 max-w-xl text-5xl font-semibold leading-[1.08] tracking-tight md:text-6xl">
             {APP_TAGLINE}
           </h1>
           <p className="mt-5 max-w-lg text-lg leading-relaxed text-[var(--studio-muted)]">
             Paste a job description. {AI_NAME} joins a Meet-style room, counts down from 10, then runs
-            a 5–6 minute voice interview (Riley wraps up — you won’t be cut off mid-answer) and a 5-minute coding task.
+            a 15–20 minute voice interview (Riley wraps up — you won’t be cut off mid-answer), with an optional 5-minute coding task.
           </p>
           <div className="mt-8 flex flex-wrap gap-3">
             <Link href="/login" className="btn-primary px-6 py-3">
@@ -55,7 +55,7 @@ export default function HomePage() {
 
       <section className="mx-auto grid max-w-6xl gap-4 px-6 pb-16 md:grid-cols-3">
         {[
-          ["1. Create a role", "Paste the JD and pick seniority. Riley interviews from that, and the coding task is generated from it."],
+          ["1. Create a role", "Paste the JD and pick seniority. Riley interviews from that. Add a coding task only if you want one."],
           ["2. Send a link", "Copy an invite URL. Share it in Slack, WhatsApp, or your ATS — no email required."],
           ["3. Read the scorecard", "Technical, communication, code, and integrity scores, plus transcript and recordings."],
         ].map(([title, body]) => (
@@ -78,11 +78,11 @@ export default function HomePage() {
         </div>
         <div className="card p-8">
           <p className="badge">For candidates</p>
-          <h2 className="mt-4 text-2xl font-semibold">Talk to {AI_NAME}, then code</h2>
+          <h2 className="mt-4 text-2xl font-semibold">Talk to {AI_NAME}</h2>
           <ul className="mt-4 space-y-2 text-[var(--studio-muted)]">
             <li>Meet-style room with Riley already joined</li>
             <li>10-second countdown to prepare</li>
-            <li>Camera, mic, screen share, and fullscreen required</li>
+            <li>Camera, mic, and fullscreen required</li>
           </ul>
         </div>
       </section>

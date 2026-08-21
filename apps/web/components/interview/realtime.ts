@@ -1,3 +1,5 @@
+import { wrapUpLine } from "@ai-interviewer/shared";
+
 export type RealtimeHandle = {
   close: () => void;
   setMicMuted: (muted: boolean) => void;
@@ -13,6 +15,7 @@ export async function connectOpenAiRealtime(opts: {
   onTranscript: (role: "assistant" | "user", text: string, meta?: { partial?: boolean }) => void;
   onResponseDone?: () => void;
   onAssistantSpeaking?: (speaking: boolean) => void;
+  includesCoding?: boolean;
 }): Promise<RealtimeHandle> {
   const pc = new RTCPeerConnection();
   pc.ontrack = (e) => {
@@ -29,7 +32,7 @@ export async function connectOpenAiRealtime(opts: {
   let assistantBuf = "";
   let wrapNoteSent = false;
   let wrapResponseSent = false;
-  const pendingUser: string[] = [];
+  const wrapLine = wrapUpLine(opts.includesCoding !== false);
   const openingTimeout = window.setTimeout(() => {
     openingDone = true;
     applyMicMute(false);
@@ -80,8 +83,7 @@ export async function connectOpenAiRealtime(opts: {
       if (msg.type === "conversation.item.input_audio_transcription.completed" && msg.transcript) {
         const spoken = msg.transcript.trim();
         if (!spoken) return;
-        if (assistantSpeaking) pendingUser.push(spoken);
-        else opts.onTranscript("user", spoken);
+        opts.onTranscript("user", spoken);
       }
       if (msg.type === "response.done") {
         openingDone = true;
@@ -91,7 +93,6 @@ export async function connectOpenAiRealtime(opts: {
         if (finalText) opts.onTranscript("assistant", finalText);
         setAssistantSpeaking(false);
         applyMicMute(false);
-        for (const spoken of pendingUser.splice(0)) opts.onTranscript("user", spoken);
         opts.onResponseDone?.();
       }
     } catch {
@@ -149,14 +150,14 @@ export async function connectOpenAiRealtime(opts: {
     },
     warnTimeLow: () => {
       sendSystemNote(
-        "You have reached about 5 minutes. You may wrap up after the candidate finishes their current answer if you have enough signal. You can also ask one last short question. Do not rush or cut them off. Stay in the 5–6 minute range.",
+        "You have reached about 15 minutes. You may wrap up after the candidate finishes their current answer if you have enough signal. First acknowledge that answer in one sentence. You can also ask one last short question — only one. Do not rush, stack questions, or cut them off. Stay in the 15–20 minute range.",
       );
     },
     requestWrapUp: (optsIn) => {
       if (!wrapNoteSent) {
         wrapNoteSent = true;
         sendSystemNote(
-          "You are at about 6 minutes. After the candidate finishes speaking, thank them and say exactly: \"Thank you. We'll move to the coding task next.\" Do not ask another question. Then stop.",
+          `You are at about 20 minutes. Do not ask any new interview questions. After the candidate finishes speaking: (1) briefly acknowledge their last answer in one sentence, (2) thank them, (3) say exactly: "${wrapLine}" Then stop. Never skip the acknowledgment.`,
         );
       }
       if (optsIn?.speakNow === false) return;

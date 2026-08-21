@@ -1,6 +1,6 @@
 "use client";
 
-import { CODING_DURATION_MS, SENIORITY_LABELS, VOICE_DURATION_MS, VOICE_HANDOFF_LINE, VOICE_MAX_MS, VOICE_WRAP_GRACE_MS, looksLikeVoiceHandoff, type Seniority } from "@ai-interviewer/shared";
+import { CODING_DURATION_MS, SENIORITY_LABELS, VOICE_DURATION_MS, VOICE_MAX_MS, VOICE_WRAP_GRACE_MS, jobIncludesCoding, looksLikeVoiceHandoff, wrapUpLine, type Seniority } from "@ai-interviewer/shared";
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Avatar } from "@/components/ui/Avatar";
@@ -18,8 +18,8 @@ type Phase = "gate" | "voice" | "coding" | "done";
 
 type Session = {
   interview: { interviewId: string; candidate: { name: string }; status: string };
-  job: { title: string; description: string; seniority?: string };
-  task: { title: string; prompt: string; starter: string; language: string };
+  job: { title: string; description: string; seniority?: string; codingRequired?: boolean };
+  task: { title: string; prompt: string; starter: string; language: string } | null;
 };
 
 function seniorityLabel(value?: string) {
@@ -65,6 +65,22 @@ function upsertAssistantTurns(
   return [...prev, { role: "assistant", text: next }];
 }
 
+function insertUserTurn(
+  prev: { role: "assistant" | "user"; text: string }[],
+  text: string,
+  assistantStreaming: boolean,
+): { role: "assistant" | "user"; text: string }[] {
+  const last = prev[prev.length - 1];
+  if (last?.role === "user" && last.text === text) return prev;
+  const prev2 = prev[prev.length - 2];
+  const insertBeforeLast =
+    last?.role === "assistant" && (assistantStreaming || prev2?.role === "assistant");
+  if (insertBeforeLast) {
+    return [...prev.slice(0, -1), { role: "user", text }, last];
+  }
+  return [...prev, { role: "user", text }];
+}
+
 function Equalizer({ active }: { active: boolean }) {
   return (
     <span className={`eq ${active ? "opacity-100" : "opacity-30"}`} aria-hidden>
@@ -104,6 +120,9 @@ export function InterviewRoom({ token }: { token: string }) {
   const transcriptScroll = useRef<HTMLDivElement>(null);
   const connectedRef = useRef(false);
   const lastTurnRef = useRef<{ role: "assistant" | "user"; text: string } | null>(null);
+  const lastAssistantPersistAt = useRef<string | null>(null);
+  const assistantStreamingRef = useRef(false);
+  const turnsRef = useRef<{ role: "assistant" | "user"; text: string }[]>([]);
   const timerStop = useRef<(() => void) | null>(null);
   const speakingRef = useRef(false);
   const phaseRef = useRef<Phase>("gate");
@@ -116,6 +135,8 @@ export function InterviewRoom({ token }: { token: string }) {
   const leaveTimer = useRef<number | null>(null);
   const graceTimer = useRef<number | null>(null);
   const beginCodingRef = useRef<() => Promise<void>>(async () => {});
+  const leaveVoiceRef = useRef<() => Promise<void>>(async () => {});
+  const includesCoding = session ? jobIncludesCoding(session.job) || Boolean(session.task) : true;
 
   phaseRef.current = phase;
 
@@ -135,7 +156,7 @@ export function InterviewRoom({ token }: { token: string }) {
     api<Session>(`/session/${token}`)
       .then((s) => {
         setSession(s);
-        setCode(s.task.starter);
+        if (s.task?.starter) setCode(s.task.starter);
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Invalid link"));
   }, [token]);
@@ -221,7 +242,7 @@ export function InterviewRoom({ token }: { token: string }) {
         if (phaseRef.current !== "voice") return;
         if (wrapStateRef.current === "closing") requestVoiceWrapUp(true);
         if (forceAfterSilenceRef.current && !pendingHandoffRef.current) {
-          void beginCodingRef.current();
+          requestVoiceWrapUp(true);
           return;
         }
         tryLeaveVoice();
@@ -229,10 +250,12 @@ export function InterviewRoom({ token }: { token: string }) {
     });
   }
 
-  function persistTurn(role: "assistant" | "user", text: string) {
+  function persistTurn(role: "assistant" | "user", text: string, at?: string) {
+    const stamp = at ?? new Date().toISOString();
+    if (role === "assistant") lastAssistantPersistAt.current = stamp;
     void api(`/session/${token}/turns`, {
       method: "POST",
-      body: JSON.stringify({ role, text, at: new Date().toISOString() }),
+      body: JSON.stringify({ role, text, at: stamp }),
     });
   }
 
@@ -265,12 +288,12 @@ export function InterviewRoom({ token }: { token: string }) {
       setVoiceWrap("leaving");
       leaveTimer.current = window.setTimeout(() => {
         leaveTimer.current = null;
-        void beginCodingRef.current();
+        void leaveVoiceRef.current();
       }, 2000);
     }, playbackMs(handoffTextRef.current));
   }
 
-  function requestVoiceWrapUp(speakNow = !speakingRef.current) {
+  function requestVoiceWrapUp(speakNow = !speakingRef.current && !rileySpeakingRef.current) {
     if (phaseRef.current !== "voice") return;
     if (wrapStateRef.current !== "handoff" && wrapStateRef.current !== "leaving") {
       wrapStateRef.current = "closing";
@@ -294,7 +317,7 @@ export function InterviewRoom({ token }: { token: string }) {
     if (wrapStateRef.current === "handoff" || wrapStateRef.current === "leaving") return;
     wrapStateRef.current = "closing";
     setVoiceWrap("closing");
-    requestVoiceWrapUp(!speakingRef.current);
+    requestVoiceWrapUp(!speakingRef.current && !rileySpeakingRef.current);
     if (graceTimer.current) window.clearTimeout(graceTimer.current);
     graceTimer.current = window.setTimeout(() => {
       if (phaseRef.current !== "voice") return;
@@ -306,7 +329,23 @@ export function InterviewRoom({ token }: { token: string }) {
         tryLeaveVoice();
         return;
       }
-      void beginCodingRef.current();
+      if (rileySpeakingRef.current) {
+        forceAfterSilenceRef.current = true;
+        return;
+      }
+      requestVoiceWrapUp(true);
+      graceTimer.current = window.setTimeout(() => {
+        if (phaseRef.current !== "voice") return;
+        if (pendingHandoffRef.current) {
+          tryLeaveVoice();
+          return;
+        }
+        if (speakingRef.current || rileySpeakingRef.current) {
+          forceAfterSilenceRef.current = true;
+          return;
+        }
+        void leaveVoiceRef.current();
+      }, VOICE_WRAP_GRACE_MS);
     }, VOICE_WRAP_GRACE_MS);
   }
 
@@ -337,6 +376,7 @@ export function InterviewRoom({ token }: { token: string }) {
         const partial = Boolean(meta?.partial);
 
         if (role === "assistant") {
+          assistantStreamingRef.current = partial;
           const lastAssistant = lastTurnRef.current?.role === "assistant" ? lastTurnRef.current.text : null;
           let next = cleaned;
           if (lastAssistant) {
@@ -353,21 +393,29 @@ export function InterviewRoom({ token }: { token: string }) {
           lastTurnRef.current = { role, text: next };
           setLastAi(next);
           setWaitingOnRiley(false);
-          setTurns((prev) => upsertAssistantTurns(prev, next));
+          setTurns((prev) => {
+            const nextTurns = upsertAssistantTurns(prev, next);
+            turnsRef.current = nextTurns;
+            return nextTurns;
+          });
           if (!partial) persistTurn("assistant", next);
           noteAssistantHandoff(next, partial);
           return;
         }
 
+        const streaming = assistantStreamingRef.current;
         const last = lastTurnRef.current;
         if (last && last.role === role && last.text === cleaned) return;
         lastTurnRef.current = { role, text: cleaned };
-        setTurns((prev) => {
-          const prevLast = prev[prev.length - 1];
-          if (prevLast && prevLast.role === role && prevLast.text === cleaned) return prev;
-          return [...prev, { role, text: cleaned }];
-        });
-        persistTurn(role, cleaned);
+        const nextTurns = insertUserTurn(turnsRef.current, cleaned, streaming);
+        const insertedBeforeAssistant = nextTurns[nextTurns.length - 1]?.role === "assistant";
+        turnsRef.current = nextTurns;
+        setTurns(nextTurns);
+        let at: string | undefined;
+        if (insertedBeforeAssistant && lastAssistantPersistAt.current) {
+          at = new Date(Date.parse(lastAssistantPersistAt.current) - 1).toISOString();
+        }
+        persistTurn(role, cleaned, at);
       };
 
       if (rt.clientSecret && camStream.current) {
@@ -378,6 +426,7 @@ export function InterviewRoom({ token }: { token: string }) {
           model: rt.model,
           mic: rtcMic,
           remoteAudio: remoteAudioRef.current,
+          includesCoding: jobIncludesCoding(session.job) || Boolean(session.task),
           onTranscript,
           onAssistantSpeaking: (isSpeaking) => {
             rileySpeakingRef.current = isSpeaking;
@@ -427,13 +476,15 @@ export function InterviewRoom({ token }: { token: string }) {
   }, [countdown]);
 
   function runMockInterviewer(onTranscript: (role: "assistant" | "user", text: string) => void) {
+    const coding = jobIncludesCoding(session?.job ?? {}) || Boolean(session?.task);
     const questions = [
-      `Hi ${session?.interview.candidate.name || "there"}, I'm ${AI_NAME} from ${APP_NAME}. This is a ${session?.job.seniority ?? "mid"} ${session?.job.title} screen: voice, then a coding task based on the job description.`,
+      `Hi ${session?.interview.candidate.name || "there"}, I'm ${AI_NAME} from ${APP_NAME}. This is a ${session?.job.seniority ?? "mid"} ${session?.job.title} screen: about 15 to 20 minutes of conversation${coding ? ", then a coding task based on the job description" : ""}.`,
       "Tell me more about you — your background, recent work, and what you enjoy building.",
       "Thanks. Let's start with a fundamentals question from the job description. How would you explain the core work this role owns?",
-      "Good. Next, walk me through how you would debug a production issue in this role.",
-      "Last one, a bit harder: what tradeoffs would you make when designing this for scale, and what would you watch in production?",
-      VOICE_HANDOFF_LINE,
+      "Got it. Walk me through how you would debug a production issue in this role.",
+      "What tradeoffs would you make when designing this for scale?",
+      "Last one: what would you watch in production after a change like that?",
+      wrapUpLine(coding),
     ];
     let i = 0;
     const speak = () => {
@@ -444,7 +495,7 @@ export function InterviewRoom({ token }: { token: string }) {
       window.speechSynthesis?.speak(new SpeechSynthesisUtterance(q));
     };
     speak();
-    mockTimer.current = window.setInterval(speak, 70_000);
+    mockTimer.current = window.setInterval(speak, 150_000);
   }
 
   async function beginCoding() {
@@ -465,17 +516,39 @@ export function InterviewRoom({ token }: { token: string }) {
   }
   beginCodingRef.current = beginCoding;
 
+  async function leaveVoice() {
+    const coding = jobIncludesCoding(session?.job ?? {}) || Boolean(session?.task);
+    if (coding) {
+      await beginCoding();
+      return;
+    }
+    await finish();
+  }
+  leaveVoiceRef.current = leaveVoice;
+
   async function finish() {
+    if (phaseRef.current === "done") return;
+    phaseRef.current = "done";
     timerStop.current?.();
     clearLeaveTimer();
     if (graceTimer.current) window.clearTimeout(graceTimer.current);
+    realtime.current?.close();
     stopRec.current?.();
     stopProctor.current?.();
     stopVad.current?.();
-    await api(`/session/${token}/code`, {
-      method: "POST",
-      body: JSON.stringify({ code }),
-    });
+    if (mockTimer.current) window.clearInterval(mockTimer.current);
+    const coding = jobIncludesCoding(session?.job ?? {}) || Boolean(session?.task);
+    if (coding) {
+      await api(`/session/${token}/code`, {
+        method: "POST",
+        body: JSON.stringify({ code }),
+      });
+    } else {
+      await api(`/session/${token}/phase`, {
+        method: "POST",
+        body: JSON.stringify({ phase: "completed" }),
+      });
+    }
     if (document.fullscreenElement) await document.exitFullscreen().catch(() => undefined);
     setPhase("done");
   }
@@ -484,8 +557,10 @@ export function InterviewRoom({ token }: { token: string }) {
   const ss = String(Math.floor((remaining % 60000) / 1000)).padStart(2, "0");
   const urgent = remaining < 60_000;
   const inCountdown = countdown !== null;
-  const canStart = ready.cam && ready.mic && ready.screen && ready.full && !starting && !inCountdown;
+  const canStart =
+    ready.cam && ready.mic && (includesCoding ? ready.screen : true) && ready.full && !starting && !inCountdown;
   const rileySpeaking = rileyTalking || (!speaking && Boolean(lastAi) && !waitingOnRiley && phase === "voice" && !inCountdown);
+  const leavingLabel = includesCoding ? "Moving to coding…" : "Finishing…";
   const statusText = inCountdown
     ? "Get ready"
     : speaking
@@ -493,7 +568,7 @@ export function InterviewRoom({ token }: { token: string }) {
         ? "Finish your answer…"
         : "You’re speaking"
       : voiceWrap === "leaving"
-        ? "Moving to coding…"
+        ? leavingLabel
         : voiceWrap === "handoff" || voiceWrap === "closing"
           ? `${AI_NAME} is wrapping up…`
           : waitingOnRiley
@@ -523,9 +598,11 @@ export function InterviewRoom({ token }: { token: string }) {
 
   const checks = [
     { key: "cam", ok: ready.cam, label: "Camera + mic", action: enableCamera, cta: ready.cam ? "On" : "Enable" },
-    { key: "screen", ok: ready.screen, label: "Screen", action: enableScreen, cta: ready.screen ? "Sharing" : "Share" },
+    ...(includesCoding
+      ? [{ key: "screen" as const, ok: ready.screen, label: "Screen", action: enableScreen, cta: ready.screen ? "Sharing" : "Share" }]
+      : []),
     { key: "full", ok: ready.full, label: "Fullscreen", action: enableFullscreen, cta: ready.full ? "On" : "Enter" },
-  ] as const;
+  ];
 
   const live = phase === "voice" && !inCountdown;
   const youName = session.interview.candidate.name;
@@ -591,10 +668,14 @@ export function InterviewRoom({ token }: { token: string }) {
                   {phase === "coding"
                     ? "Coding · 2 of 2"
                     : voiceWrap === "leaving"
-                      ? "Moving to coding…"
+                      ? leavingLabel
                       : voiceWrap === "closing" || voiceWrap === "handoff"
-                        ? "Wrapping up · 1 of 2"
-                        : "Voice · 1 of 2"}
+                        ? includesCoding
+                          ? "Wrapping up · 1 of 2"
+                          : "Wrapping up"
+                        : includesCoding
+                          ? "Voice · 1 of 2"
+                          : "Voice"}
                 </span>
                 {phase === "coding" ? (
                   <span
@@ -661,8 +742,9 @@ export function InterviewRoom({ token }: { token: string }) {
                 <p className="text-sm font-medium text-[#9cb8ff]">Welcome, {youName.split(" ")[0]}</p>
                 <h2 className="mt-2 text-3xl font-semibold tracking-tight text-white">Set up before you start</h2>
                 <p className="mt-3 text-sm leading-relaxed text-[var(--studio-muted)]">
-                  This is a 10-minute screen for {session.job.title} ({seniorityLabel(session.job.seniority)}):
-                  About 5–6 minutes of voice, then 5 minutes of coding. {AI_NAME} wraps up when ready — you won’t be cut off mid-answer.
+                  This is a 15–20 minute conversation for {session.job.title} ({seniorityLabel(session.job.seniority)})
+                  {includesCoding ? ", then a 5-minute coding task" : ""}. {AI_NAME} wraps up when ready — you
+                  won’t be cut off mid-answer.
                 </p>
                 <ul className="mt-7 space-y-3">
                   {checks.map((item) => (
@@ -676,7 +758,7 @@ export function InterviewRoom({ token }: { token: string }) {
                             item.ok ? "bg-[#143d2e] text-[#3dd68c]" : "bg-white/8 text-[var(--studio-muted)]"
                           }`}
                         >
-                          {item.ok ? "✓" : item.key === "cam" ? "1" : item.key === "screen" ? "2" : "3"}
+                          {item.ok ? "✓" : item.key === "cam" ? "1" : item.key === "screen" ? "2" : String(includesCoding ? 3 : 2)}
                         </span>
                         <div>
                           <p className="text-sm font-medium text-white">{item.label}</p>
@@ -717,7 +799,7 @@ export function InterviewRoom({ token }: { token: string }) {
                 <Equalizer active={rileySpeaking || speaking} />
                 {statusText}
               </div>
-              <button className="text-xs font-medium text-[var(--studio-muted)] hover:text-white" onClick={() => void beginCoding()}>
+              <button className="text-xs font-medium text-[var(--studio-muted)] hover:text-white" onClick={() => void leaveVoice()}>
                 Skip
               </button>
             </div>
@@ -753,7 +835,7 @@ export function InterviewRoom({ token }: { token: string }) {
         </section>
       ) : null}
 
-      {phase === "coding" ? (
+      {phase === "coding" && session.task ? (
         <section className="grid flex-1 gap-4 px-4 pb-4 lg:grid-cols-[240px_1fr] lg:px-6">
           <aside className="flex flex-col gap-3">
             <div className="meet-tile aspect-[3/4] min-h-0">

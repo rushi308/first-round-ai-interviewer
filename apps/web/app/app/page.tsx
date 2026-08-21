@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   SENIORITY_LABELS,
+  jobIncludesCoding,
   type Interview,
   type Job,
   type Seniority,
@@ -25,6 +26,7 @@ export default function DashboardPage() {
     "Build React + TypeScript product UI. Strong hooks, performance, and testing.",
   );
   const [seniority, setSeniority] = useState<Seniority>("mid");
+  const [codingRequired, setCodingRequired] = useState(true);
   const [creating, setCreating] = useState(false);
   const [candidateName, setCandidateName] = useState("");
   const [jobId, setJobId] = useState("");
@@ -48,10 +50,13 @@ export default function DashboardPage() {
     try {
       const job = await api<Job>("/jobs", {
         method: "POST",
-        body: JSON.stringify({ title, description, seniority }),
+        body: JSON.stringify({ title, description, seniority, codingRequired }),
       });
       setJobId(job.jobId);
-      toast.success("Role created", "Riley and the coding task will follow this JD.");
+      toast.success(
+        "Role created",
+        codingRequired ? "Riley and the coding task will follow this JD." : "Riley will run a voice-only interview from this JD.",
+      );
       await refresh();
     } catch (err) {
       toast.error("Couldn’t create role", err instanceof Error ? err.message : "Try again");
@@ -130,7 +135,7 @@ export default function DashboardPage() {
             <label className="label">Job description</label>
             <textarea
               className="input h-28 resize-none"
-              placeholder="Paste the job description. Riley interviews from this, and the coding task is generated from it."
+              placeholder="Paste the job description. Riley interviews from this."
               value={description}
               onChange={(e) => setDescription(e.target.value)}
             />
@@ -149,6 +154,20 @@ export default function DashboardPage() {
               ))}
             </select>
           </div>
+          <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-2xl border border-[var(--studio-line)] bg-black/20 px-4 py-3">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={codingRequired}
+              onChange={(e) => setCodingRequired(e.target.checked)}
+            />
+            <span>
+              <span className="block text-sm font-medium">Include a coding task</span>
+              <span className="mt-0.5 block text-xs text-[var(--studio-muted)]">
+                Uncheck for a 15–20 minute voice-only interview. No coding score or task will be generated.
+              </span>
+            </span>
+          </label>
           <button className="btn-primary mt-5 px-5 py-2.5 text-sm" disabled={creating}>
             {creating ? "Creating…" : "Create role"}
           </button>
@@ -232,6 +251,7 @@ export default function DashboardPage() {
                       {job ? (
                         <p className="text-xs text-[var(--studio-muted)]">
                           {SENIORITY_LABELS[job.seniority ?? "mid"]}
+                          {jobIncludesCoding(job) ? "" : " · Voice only"}
                         </p>
                       ) : null}
                     </td>

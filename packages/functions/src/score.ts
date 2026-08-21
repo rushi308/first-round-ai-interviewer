@@ -1,6 +1,8 @@
 import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedrock-runtime";
 import {
   getCodingTask,
+  jobIncludesCoding,
+  orderTranscriptTurns,
   scorecardSchema,
   type IntegrityEvent,
   type Interview,
@@ -47,39 +49,14 @@ function buildGradingPrompt(input: {
   turns: TranscriptTurn[];
   events: IntegrityEvent[];
   integrity: number;
+  includesCoding: boolean;
   unsolved: boolean;
   taskTitle: string;
   taskPrompt: string;
   starter: string;
 }): string {
-  return `You are an expert technical hiring interviewer for IT roles.
-Grade this candidate fairly and strictly from evidence only. Do not invent strengths that are not in the transcript or code.
-
-Return ONLY valid JSON (no markdown) matching:
-{
-  "technical": 0-10,
-  "communication": 0-10,
-  "codeQuality": 0-10,
-  "integrity": 0-10,
-  "hireRecommendation": "yes" | "lean_yes" | "lean_no" | "no",
-  "summary": "2-4 sentences for the recruiter",
-  "strengths": ["..."],
-  "concerns": ["..."]
-}
-
-Scoring guidance:
-- technical: correctness/depth of spoken answers vs the JD and seniority. Thin or missing answers must score low. Grade a Junior more gently than Staff.
-- communication: clarity, structure, relevance — not friendliness alone.
-- codeQuality: compare submitted code to the starter and task. Unchanged starter / leftover TODOs = 0-2. Partial attempt = 3-5. Working solution = 6-9. Excellent = 10.
-- integrity: start from the hint (${input.integrity}); lower for many tab_hidden, fullscreen_exit, no_face, multi_face, paste_attempt events.
-- hireRecommendation: require both meaningful voice evidence AND a real coding attempt for lean_yes/yes.
-
-Job title: ${input.job.title}
-Seniority: ${input.job.seniority ?? "mid"}
-Job description:
-${input.job.description}
-
-Coding task: ${input.taskTitle}
+  const codingBlock = input.includesCoding
+    ? `Coding task: ${input.taskTitle}
 Instructions:
 ${input.taskPrompt}
 
@@ -95,6 +72,46 @@ ${input.interview.submittedCode || "(empty)"}
 
 Automated flag — appears still on starter/TODOs: ${input.unsolved}
 
+- codeQuality: compare submitted code to the starter and task. Unchanged starter / leftover TODOs = 0-2. Partial attempt = 3-5. Working solution = 6-9. Excellent = 10.
+- hireRecommendation: require both meaningful voice evidence AND a real coding attempt for lean_yes/yes.`
+    : `This role has NO coding task. Do not invent a codeQuality score. Omit codeQuality from the JSON.
+- hireRecommendation: based on voice evidence only. lean_yes/yes still need meaningful, JD-relevant answers.`;
+
+  return `You are an expert technical hiring interviewer for IT roles.
+Grade this candidate fairly and strictly from evidence only. Do not invent strengths that are not in the transcript or code.
+
+Return ONLY valid JSON (no markdown) matching:
+{
+  "technical": 0-10,
+  "communication": 0-10,${input.includesCoding ? `
+  "codeQuality": 0-10,` : ""}
+  "integrity": 0-10,
+  "hireRecommendation": "yes" | "lean_yes" | "lean_no" | "no",
+  "summary": "2-4 sentences for the recruiter",
+  "strengths": ["..."],
+  "concerns": ["..."],
+  "qaReview": [
+    {
+      "question": "the question Riley asked",
+      "answer": "what the candidate actually said (paraphrase only if needed)",
+      "bestAnswer": "a strong, seniority-calibrated model answer the recruiter can compare against"
+    }
+  ]
+}
+
+Scoring guidance:
+- technical: correctness/depth of spoken answers vs the JD and seniority. Thin or missing answers must score low. Grade a Junior more gently than Staff.
+- communication: clarity, structure, relevance — not friendliness alone.
+- codeQuality: compare submitted code to the starter and task. Unchanged starter / leftover TODOs = 0-2. Partial attempt = 3-5. Working solution = 6-9. Excellent = 10.
+- integrity: start from the hint (${input.integrity}); lower for many tab_hidden, fullscreen_exit, no_face, multi_face, paste_attempt events.
+- qaReview: one item per substantive question Riley asked. Skip greetings and wrap-up lines. If the candidate did not answer, set answer to "(no answer)" and still provide bestAnswer.
+${codingBlock}
+
+Job title: ${input.job.title}
+Seniority: ${input.job.seniority ?? "mid"}
+Job description:
+${input.job.description}
+
 Interview transcript (assistant = AI interviewer, user = candidate):
 ${input.turns.map((t) => `${t.role}: ${t.text}`).join("\n") || "(no transcript captured)"}
 
@@ -103,7 +120,7 @@ ${input.events.map((e) => `${e.at} ${e.type}${e.detail ? ` ${e.detail}` : ""}`).
 `;
 }
 
-function parseScorecard(text: string, integrityFallback: number): Scorecard {
+function parseScorecard(text: string, integrityFallback: number, includesCoding: boolean): Scorecard {
   const cleaned = text.replace(/```json|```/g, "").trim();
   const start = cleaned.indexOf("{");
   const end = cleaned.lastIndexOf("}");
@@ -111,6 +128,20 @@ function parseScorecard(text: string, integrityFallback: number): Scorecard {
   return scorecardSchema.parse({
     ...json,
     integrity: typeof json.integrity === "number" ? json.integrity : integrityFallback,
+    codeQuality: includesCoding
+      ? typeof json.codeQuality === "number"
+        ? json.codeQuality
+        : 0
+      : undefined,
+    qaReview: Array.isArray(json.qaReview)
+      ? json.qaReview
+          .filter((item: { question?: unknown }) => typeof item?.question === "string")
+          .map((item: { question?: unknown; answer?: unknown; bestAnswer?: unknown }) => ({
+            question: String(item.question ?? ""),
+            answer: String(item.answer ?? "(no answer)"),
+            bestAnswer: String(item.bestAnswer ?? ""),
+          }))
+      : [],
   });
 }
 
@@ -118,6 +149,7 @@ async function gradeWithOpenAi(
   apiKey: string,
   prompt: string,
   integrity: number,
+  includesCoding: boolean,
 ): Promise<Scorecard> {
   const model = process.env.OPENAI_SCORE_MODEL || "gpt-4o-mini";
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -148,10 +180,10 @@ async function gradeWithOpenAi(
   };
   const content = data.choices?.[0]?.message?.content;
   if (!content) throw new Error("openai_score_empty");
-  return parseScorecard(content, integrity);
+  return parseScorecard(content, integrity, includesCoding);
 }
 
-async function gradeWithBedrock(prompt: string, integrity: number): Promise<Scorecard> {
+async function gradeWithBedrock(prompt: string, integrity: number, includesCoding: boolean): Promise<Scorecard> {
   const modelId = process.env.BEDROCK_MODEL_ID;
   if (!modelId) throw new Error("bedrock_not_configured");
   const bedrock = new BedrockRuntimeClient({});
@@ -162,7 +194,7 @@ async function gradeWithBedrock(prompt: string, integrity: number): Promise<Scor
       accept: "application/json",
       body: JSON.stringify({
         anthropic_version: "bedrock-2023-05-31",
-        max_tokens: 1500,
+        max_tokens: 3500,
         messages: [{ role: "user", content: prompt }],
       }),
     }),
@@ -172,24 +204,26 @@ async function gradeWithBedrock(prompt: string, integrity: number): Promise<Scor
   };
   const text = raw.content?.[0]?.text;
   if (!text) throw new Error("bedrock_score_empty");
-  return parseScorecard(text, integrity);
+  return parseScorecard(text, integrity, includesCoding);
 }
 
 function emergencyHeuristic(input: {
   answered: number;
+  includesCoding: boolean;
   unsolved: boolean;
   integrity: number;
 }): ScoredResult {
   return {
     technical: Math.min(3, input.answered),
     communication: Math.min(3, input.answered),
-    codeQuality: input.unsolved ? 1 : 4,
+    ...(input.includesCoding ? { codeQuality: input.unsolved ? 1 : 4 } : {}),
     integrity: input.integrity,
     hireRecommendation: "no",
     summary:
       "Emergency fallback only — AI grading failed. Do not trust these numbers; re-run scoring after fixing OpenAI/Bedrock access.",
     strengths: [],
     concerns: ["AI grading unavailable"],
+    qaReview: [],
     gradedBy: "heuristic",
   };
 }
@@ -201,33 +235,40 @@ export async function scoreInterview(input: {
   events: IntegrityEvent[];
   openaiKey?: string;
 }): Promise<ScoredResult> {
-  const task = getCodingTask({
-    codingTask: input.interview.codingTask ?? input.job.codingTask,
-    seniority: input.job.seniority,
-  });
+  const includesCoding = jobIncludesCoding(input.job) || Boolean(input.interview.codingTask);
+  const task = includesCoding
+    ? getCodingTask({
+        codingTask: input.interview.codingTask ?? input.job.codingTask,
+        seniority: input.job.seniority,
+      })
+    : null;
   const integrity = integrityScore(input.events);
-  const unsolved = isUnsolvedStarter(input.interview.submittedCode, task.starter);
+  const unsolved = includesCoding && task
+    ? isUnsolvedStarter(input.interview.submittedCode, task.starter)
+    : false;
   const answered = input.turns.filter(
     (t) => t.role === "user" && t.text.trim().length >= 40,
   ).length;
+  const turns = orderTranscriptTurns(input.turns);
 
   const prompt = buildGradingPrompt({
     job: input.job,
     interview: input.interview,
-    turns: input.turns,
+    turns,
     events: input.events,
     integrity,
+    includesCoding,
     unsolved,
-    taskTitle: task.title,
-    taskPrompt: task.prompt,
-    starter: task.starter,
+    taskTitle: task?.title ?? "",
+    taskPrompt: task?.prompt ?? "",
+    starter: task?.starter ?? "",
   });
 
   const withStarterGuard = (card: Scorecard, gradedBy: ScoreSource): ScoredResult => {
-    if (unsolved && card.codeQuality > 3) {
+    if (includesCoding && unsolved && (card.codeQuality ?? 0) > 3) {
       return {
         ...card,
-        codeQuality: Math.min(card.codeQuality, 2),
+        codeQuality: Math.min(card.codeQuality ?? 0, 2),
         hireRecommendation:
           card.hireRecommendation === "yes" || card.hireRecommendation === "lean_yes"
             ? "lean_no"
@@ -236,12 +277,15 @@ export async function scoreInterview(input: {
         gradedBy,
       };
     }
+    if (!includesCoding) {
+      return { ...card, codeQuality: undefined, gradedBy };
+    }
     return { ...card, gradedBy };
   };
 
   // Primary: Bedrock Claude (AWS-native)
   try {
-    const card = await gradeWithBedrock(prompt, integrity);
+    const card = await gradeWithBedrock(prompt, integrity, includesCoding);
     return withStarterGuard(card, "bedrock");
   } catch (err) {
     console.error("Bedrock grading failed", err);
@@ -251,12 +295,12 @@ export async function scoreInterview(input: {
   const openaiKey = input.openaiKey || process.env.OPENAI_API_KEY;
   if (openaiKey) {
     try {
-      const card = await gradeWithOpenAi(openaiKey, prompt, integrity);
+      const card = await gradeWithOpenAi(openaiKey, prompt, integrity, includesCoding);
       return withStarterGuard(card, "openai");
     } catch (err) {
       console.error("OpenAI grading failed", err);
     }
   }
 
-  return emergencyHeuristic({ answered, unsolved, integrity });
+  return emergencyHeuristic({ answered, includesCoding, unsolved, integrity });
 }
