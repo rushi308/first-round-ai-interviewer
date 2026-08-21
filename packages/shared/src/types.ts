@@ -83,6 +83,8 @@ export const qaReviewItemSchema = z.object({
   question: z.string(),
   answer: z.string(),
   bestAnswer: z.string(),
+  answerScore: z.number().min(0).max(10).optional(),
+  missed: z.array(z.string()).optional(),
 });
 export type QaReviewItem = z.infer<typeof qaReviewItemSchema>;
 

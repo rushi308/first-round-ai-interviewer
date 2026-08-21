@@ -149,27 +149,46 @@ export default function ScorecardPage() {
         <section className="mt-8">
           <h2 className="text-lg font-semibold">Questions & answers</h2>
           <p className="mt-1 text-sm text-[var(--studio-muted)]">
-            What Riley asked, what they said, and a sample best answer built from their response.
+            Each answer is scored against a strong hire for this role — not against nicer wording.
           </p>
           <div className="mt-4 space-y-4">
             {s.qaReview.map((item, i) => (
               <article key={`${item.question}-${i}`} className="card p-5">
-                <p className="text-xs font-semibold uppercase tracking-wide text-[#9cb8ff]">
-                  Question {i + 1}
-                </p>
-                <p className="mt-1 font-medium leading-relaxed">{item.question}</p>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-[#9cb8ff]">
+                      Question {i + 1}
+                    </p>
+                    <p className="mt-1 font-medium leading-relaxed">{item.question}</p>
+                  </div>
+                  {item.answerScore != null ? (
+                    <span className="shrink-0 rounded-full bg-white/8 px-3 py-1 text-sm font-semibold">
+                      {item.answerScore}/10
+                    </span>
+                  ) : null}
+                </div>
                 <div className="mt-4 space-y-3">
                   <div className="rounded-2xl bg-black/20 px-4 py-3">
                     <p className="text-xs font-semibold text-[var(--studio-muted)]">Candidate answer</p>
                     <p className="mt-1.5 text-sm leading-relaxed">{item.answer || "(no answer)"}</p>
                   </div>
+                  {item.missed?.length ? (
+                    <div className="rounded-2xl bg-black/20 px-4 py-3">
+                      <p className="text-xs font-semibold text-[var(--bad)]">What a strong answer includes that they missed</p>
+                      <ul className="mt-1.5 list-disc space-y-1 pl-5 text-sm leading-relaxed">
+                        {item.missed.map((gap) => (
+                          <li key={gap}>{gap}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
                   {item.bestAnswer ? (
                     <div className="rounded-2xl border border-[#143d2e] bg-[#0d1f18] px-4 py-3">
                       <p className="text-xs font-semibold text-[var(--good)]">
-                        Sample best answer
+                        Strong answer (measuring stick)
                       </p>
                       <p className="mt-0.5 text-[11px] text-[var(--studio-muted)]">
-                        Strong version of this answer — keeps their points and fills the gaps.
+                        What a strong hire would actually say — used to score the answer above.
                       </p>
                       <p className="mt-1.5 text-sm leading-relaxed">{item.bestAnswer}</p>
                     </div>
